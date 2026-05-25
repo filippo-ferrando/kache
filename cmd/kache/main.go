@@ -9,6 +9,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
+
+	"kache/pkg/protocol"
 
 	"github.com/spf13/cobra"
 )
@@ -17,15 +20,15 @@ var apiTarget string
 
 func main() {
 	rootCmd := &cobra.Command{
-		Use:   "kache",
-		Short: "kache controls and interacts with your decentralized CDN edge network",
+		Use:   "kachectl",
+		Short: "kachectl controls and interacts with your decentralized CDN edge network",
 	}
 
 	rootCmd.PersistentFlags().StringVar(&apiTarget, "endpoint", "http://127.0.0.1:8080", "Target URL of the local dCDN node control API")
 
 	statusCmd := &cobra.Command{
 		Use:   "status",
-		Short: "Fetch current connectivity status metrics from the running daemon",
+		Short: "Fetch current connectivity status metrics from pointed cdn node",
 		Run: func(cmd *cobra.Command, args []string) {
 			resp, err := http.Get(apiTarget + "/status")
 			if err != nil {
@@ -42,7 +45,7 @@ func main() {
 
 	listCmd := &cobra.Command{
 		Use:   "list",
-		Short: "List all files currently pinned or cached on this local CDN edge node",
+		Short: "List all files currently pinned or cached on poitend CDN edge node",
 		Run: func(cmd *cobra.Command, args []string) {
 			resp, err := http.Get(apiTarget + "/content/list")
 			if err != nil {
@@ -109,7 +112,7 @@ func main() {
 
 	uploadCmd := &cobra.Command{
 		Use:   "upload [file_path]",
-		Short: "Stream a local file from your laptop into the CDN network",
+		Short: "Upload local file into the CDN network",
 		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			filePath := args[0]
@@ -159,17 +162,16 @@ func main() {
 		},
 	}
 
-	// NEW: Pulls file contents from the CDN directly down to your laptop execution path
 	getCmd := &cobra.Command{
-		Use:   "get [cid] [destination_path_on_laptop]",
-		Short: "Stream file payload contents directly onto your laptop workspace file system",
+		Use:   "get [cid] [destination_path]",
+		Short: "Download CDN file on local machine",
 		Args:  cobra.ExactArgs(2),
 		Run: func(cmd *cobra.Command, args []string) {
 			targetCID := args[0]
 			destPath := args[1]
 
 			url := fmt.Sprintf("%s/content/stream/%s", apiTarget, targetCID)
-			fmt.Printf("[Laptop Action] Initializing edge file sync stream for CID: %s...\n", targetCID)
+			fmt.Printf("[Local Action] Initializing edge file sync stream for CID: %s...\n", targetCID)
 
 			resp, err := http.Get(url)
 			if err != nil {
@@ -184,7 +186,6 @@ func main() {
 				return
 			}
 
-			// Generate physical target destination on laptop
 			outFile, err := os.Create(destPath)
 			if err != nil {
 				fmt.Printf("[Filesystem Error] Cannot open local output path: %v\n", err)
@@ -202,7 +203,59 @@ func main() {
 		},
 	}
 
-	rootCmd.AddCommand(statusCmd, listCmd, advertiseCmd, downloadCmd, uploadCmd, getCmd)
+	nodesCmd := &cobra.Command{
+		Use:   "nodes",
+		Short: "Print a complete latency topology map of all nodes across the CDN swarm",
+		Run: func(cmd *cobra.Command, args []string) {
+			startTime := time.Now()
+			resp, err := http.Get(apiTarget + "/swarm/matrix")
+			localLatency := time.Since(startTime)
+
+			if err != nil {
+				fmt.Printf("[Error] Unable to reach local control node: %v\n", err)
+				return
+			}
+			defer resp.Body.Close()
+
+			body, _ := io.ReadAll(resp.Body)
+
+			var matrix protocol.SwarmMatrixResponse
+			if err := json.Unmarshal(body, &matrix); err != nil {
+				fmt.Println("Raw Server Payload:", string(body))
+				return
+			}
+
+			matrix.LocalToDaemonLatency = localLatency.String()
+
+			fmt.Printf("=== CDN NETWORK WEATHER MAP ===\n\n")
+			fmt.Printf("local host -> Edge Daemon [%s]: %s\n\n", matrix.LocalNodeID[:12], matrix.LocalToDaemonLatency)
+
+			if len(matrix.ClusterNodes) == 0 {
+				fmt.Println(" No external peer nodes currently registered.")
+				return
+			}
+
+			for peerID, info := range matrix.ClusterNodes {
+				fmt.Printf("▪ Node ID: %s\n", peerID)
+				fmt.Printf("  └─ Latency from local host: %s\n", info.LatencyFromUs)
+				fmt.Printf("  └─ Latency from node %s :\n", peerID)
+
+				if len(info.TargetViews) == 0 {
+					fmt.Println("     (No active outward peer views mapped)")
+				}
+				for targetID, rtt := range info.TargetViews {
+					shortTarget := targetID
+					if len(targetID) > 16 {
+						shortTarget = targetID[:16] + "..."
+					}
+					fmt.Printf("     ├── To Peer [%s]: %s\n", shortTarget, rtt)
+				}
+				fmt.Println()
+			}
+		},
+	}
+
+	rootCmd.AddCommand(statusCmd, listCmd, advertiseCmd, downloadCmd, uploadCmd, getCmd, nodesCmd)
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}

@@ -1,13 +1,16 @@
+// Package api - implements the HTTP API server for the Kache edge caching system. It provides endpoints for clients to interact with the cache and orchestrates P2P data transfers and DHT operations under the hood. The API server also handles incoming P2P streams for data fetching and replication, ensuring seamless integration between the HTTP interface and the libp2p network layer.
 package api
 
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"time"
 
 	"kache/internal/cache"
@@ -17,10 +20,11 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
+	"github.com/libp2p/go-libp2p/core/peer"
 	p2pProtocol "github.com/libp2p/go-libp2p/core/protocol"
 )
 
-const DataProtocolID = p2pProtocol.ID("/mini-dcdn/data/1.0.0")
+const DataProtocolID = p2pProtocol.ID("/kache/data/1.0.0")
 
 type APIServer struct {
 	host  host.Host
@@ -40,12 +44,45 @@ func (s *APIServer) Start(listenAddr string) error {
 
 	r.GET("/status", s.handleStatus)
 	r.GET("/content/list", s.handleContentList)
-	r.GET("/content/stream/:cid", s.handleStreamToClient) // NEW: Streaming payload endpoint
+	r.GET("/content/stream/:cid", s.handleStreamToClient)
+	r.GET("/swarm/matrix", s.handleSwarmMatrix)
 	r.POST("/content/advertise", s.handleAdvertise)
 	r.POST("/content/download", s.handleDownload)
 	r.POST("/content/upload", s.handleUpload)
 
 	return http.ListenAndServe(listenAddr, r)
+}
+
+func (s *APIServer) sortProvidersByLatency(providers []peer.AddrInfo) {
+	sort.Slice(providers, func(i, j int) bool {
+		latencyI := s.host.Peerstore().LatencyEWMA(providers[i].ID)
+		latencyJ := s.host.Peerstore().LatencyEWMA(providers[j].ID)
+
+		if latencyI == 0 {
+			latencyI = time.Hour
+		}
+		if latencyJ == 0 {
+			latencyJ = time.Hour
+		}
+
+		return latencyI < latencyJ
+	})
+}
+
+func (s *APIServer) sortPeersByLatency(peers []peer.ID) {
+	sort.Slice(peers, func(i, j int) bool {
+		latencyI := s.host.Peerstore().LatencyEWMA(peers[i])
+		latencyJ := s.host.Peerstore().LatencyEWMA(peers[j])
+
+		if latencyI == 0 {
+			latencyI = time.Hour
+		}
+		if latencyJ == 0 {
+			latencyJ = time.Hour
+		}
+
+		return latencyI < latencyJ
+	})
 }
 
 func (s *APIServer) handleStatus(c *gin.Context) {
@@ -70,7 +107,6 @@ func (s *APIServer) handleStatus(c *gin.Context) {
 	})
 }
 
-// ENHANCED: Now maps active Kademlia DHT providers for each listed item
 func (s *APIServer) handleContentList(c *gin.Context) {
 	items := s.cache.ListRegistry()
 	fileList := make([]protocol.FileInfo, 0, len(items))
@@ -79,10 +115,8 @@ func (s *APIServer) handleContentList(c *gin.Context) {
 	defer cancel()
 
 	for _, item := range items {
-		// Start with itself since it exists in the local node cache registry
 		providersList := []string{s.host.ID().String()}
 
-		// Query Kademlia to see if external nodes have replicated this item
 		if remoteProviders, err := s.dht.LocateProviders(ctx, item.CID); err == nil {
 			for _, p := range remoteProviders {
 				providersList = append(providersList, p.ID.String())
@@ -100,7 +134,6 @@ func (s *APIServer) handleContentList(c *gin.Context) {
 	c.JSON(http.StatusOK, fileList)
 }
 
-// NEW: Streams data from the CDN directly back to your local laptop filesystem
 func (s *APIServer) handleStreamToClient(c *gin.Context) {
 	targetCID := c.Param("cid")
 	if targetCID == "" {
@@ -108,10 +141,8 @@ func (s *APIServer) handleStreamToClient(c *gin.Context) {
 		return
 	}
 
-	// 1. Check local cache first
 	data, err := s.cache.Get(targetCID)
 	if err != nil {
-		// 2. Cache Miss: Fetch data from the P2P network first
 		log.Printf("[API Gateway] Cache miss for client download request '%s'. Fetching from network...", targetCID)
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
@@ -122,6 +153,10 @@ func (s *APIServer) handleStreamToClient(c *gin.Context) {
 			return
 		}
 
+		s.sortProvidersByLatency(providers)
+
+		log.Printf("[API Gateway] Routing stream lookup request to physically closest provider: %s", providers[0].ID.ShortString())
+
 		stream, err := s.host.NewStream(ctx, providers[0].ID, DataProtocolID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("P2P stream failed: %v", err)})
@@ -129,14 +164,18 @@ func (s *APIServer) handleStreamToClient(c *gin.Context) {
 		}
 		defer stream.Close()
 
-		_, _ = stream.Write([]byte(targetCID + "\n"))
+		_, err = stream.Write([]byte("FETCH\n" + targetCID + "\n"))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to push unified command wire payload"})
+			return
+		}
+
 		fetchedData, err := io.ReadAll(stream)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Network data transfer failure"})
 			return
 		}
 
-		// Save to edge cache allocations so this node behaves as an active replicator
 		if err := s.cache.Put(targetCID, fetchedData, 0); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal write storage constraints hit"})
 			return
@@ -145,7 +184,6 @@ func (s *APIServer) handleStreamToClient(c *gin.Context) {
 		data = fetchedData
 	}
 
-	// 3. Pipe binary octet-stream back down to your laptop client execution loop
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", targetCID))
 	c.Data(http.StatusOK, "application/octet-stream", data)
 }
@@ -179,7 +217,6 @@ func (s *APIServer) handleAdvertise(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "success", "message": "File indexed and advertised to swarm"})
 }
 
-// Updated handleDownload that utilizes the "FETCH\n" wire protocol header
 func (s *APIServer) handleDownload(c *gin.Context) {
 	var req protocol.DownloadRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -187,7 +224,6 @@ func (s *APIServer) handleDownload(c *gin.Context) {
 		return
 	}
 
-	// 1. If it's already in our local cache, return a cache hit early
 	if data, err := s.cache.Get(req.CID); err == nil {
 		c.JSON(http.StatusOK, gin.H{"status": "hit", "message": "File already present in local cache", "size": len(data)})
 		return
@@ -196,17 +232,15 @@ func (s *APIServer) handleDownload(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	// 2. Query Kademlia DHT to find which external peers have advertised this hash
 	providers, err := s.dht.LocateProviders(ctx, req.CID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("content not found in network: %v", err)})
 		return
 	}
 
-	// Select the first discovered provider from the swarm
+	s.sortProvidersByLatency(providers)
 	targetPeer := providers[0]
 
-	// 3. Establish a direct P2P connection stream to the provider node
 	stream, err := s.host.NewStream(ctx, targetPeer.ID, DataProtocolID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to connect to provider stream: %v", err)})
@@ -214,29 +248,25 @@ func (s *APIServer) handleDownload(c *gin.Context) {
 	}
 	defer stream.Close()
 
-	log.Printf("[API Gateway] Sending FETCH wire command to peer %s for CID: %s", targetPeer.ID.ShortString(), req.CID)
+	log.Printf("[API Gateway] Sending FETCH wire command to nearest edge peer %s for CID: %s", targetPeer.ID.ShortString(), req.CID)
 
-	// 4. Write the upgraded wire protocol headers: FETCH\n<cid>\n
 	_, err = stream.Write([]byte("FETCH\n" + req.CID + "\n"))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to write command headers to peer: %v", err)})
 		return
 	}
 
-	// 5. Read the streaming data payload sent back from the remote peer
 	fetchedData, err := io.ReadAll(stream)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("download interrupted midway: %v", err)})
 		return
 	}
 
-	// 6. Save the newly acquired file into our local cache engine
 	if err := s.cache.Put(req.CID, fetchedData, 0); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to commit downloaded file to cache: %v", err)})
 		return
 	}
 
-	// 7. Automatically advertise ourselves as a new provider for this content hash
 	_ = s.dht.Advertise(ctx, req.CID)
 
 	c.JSON(http.StatusOK, gin.H{
@@ -246,7 +276,6 @@ func (s *APIServer) handleDownload(c *gin.Context) {
 	})
 }
 
-// Updated handleUpload that triggers instant replication to the swarm
 func (s *APIServer) handleUpload(c *gin.Context) {
 	file, err := c.FormFile("file")
 	if err != nil {
@@ -271,7 +300,6 @@ func (s *APIServer) handleUpload(c *gin.Context) {
 	hasher.Write(fileBytes)
 	generatedCID := fmt.Sprintf("%x", hasher.Sum(nil))
 
-	// 1. Save to local storage
 	if err := s.cache.Put(generatedCID, fileBytes, 0); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -280,18 +308,15 @@ func (s *APIServer) handleUpload(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// 2. Advertise ownership to the Kademlia DHT routing table
 	if err := s.dht.Advertise(ctx, generatedCID); err != nil {
 		log.Printf("[API Warning] DHT advertise failed: %v", err)
 	}
 
-	// 3. NEW: Proactively copy this data to neighbors instantly
 	go s.replicateToSwarm(generatedCID, fileBytes)
 
 	c.JSON(http.StatusOK, gin.H{"status": "uploaded & replicated", "cid": generatedCID, "size": file.Size})
 }
 
-// Background worker that pushes files to any currently connected swarm peers
 func (s *APIServer) replicateToSwarm(cid string, data []byte) {
 	peers := s.host.Peerstore().Peers()
 	if len(peers) <= 1 {
@@ -299,13 +324,21 @@ func (s *APIServer) replicateToSwarm(cid string, data []byte) {
 		return
 	}
 
+	closestPeers, err := s.dht.GetClosestPeers(context.Background(), cid)
+	if err != nil {
+		log.Printf("[Kademlia replication error] Failed to find closest peers for replication: %v", err)
+		return
+	}
+
+	s.sortPeersByLatency(closestPeers)
+
 	replicatedCount := 0
-	for _, peerID := range peers {
+	for _, peerID := range closestPeers {
 		if peerID == s.host.ID() {
-			continue // Skip self
+			continue
 		}
 
-		log.Printf("[Replication] Proactively pushing copy of %s to peer %s", cid, peerID.ShortString())
+		log.Printf("[Replication] Proactively pushing copy of %s to physically nearest XOR peer %s", cid, peerID.ShortString())
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		stream, err := s.host.NewStream(ctx, peerID, DataProtocolID)
@@ -314,25 +347,22 @@ func (s *APIServer) replicateToSwarm(cid string, data []byte) {
 			continue
 		}
 
-		// Write our new wire protocol header: STORE\n<cid>\n<bytes>
 		_, _ = stream.Write([]byte("STORE\n" + cid + "\n"))
 		_, _ = stream.Write(data)
 		stream.Close()
 		cancel()
 
 		replicatedCount++
-		if replicatedCount >= 2 { // Cap replication factor to 2 neighbors for this test
+		if replicatedCount >= 2 {
 			break
 		}
 	}
 	log.Printf("[Replication] Instant replication pass complete. Pushed data to %d peers.", replicatedCount)
 }
 
-// Upgraded P2P Stream Handler capable of handling both Pulls and proactive Pushes
 func (s *APIServer) handleIncomingP2PStream(stream network.Stream) {
 	defer stream.Close()
 
-	// Read the command action (either "FETCH" or "STORE")
 	var command string
 	_, err := fmt.Fscanln(stream, &command)
 	if err != nil {
@@ -359,21 +389,82 @@ func (s *APIServer) handleIncomingP2PStream(stream network.Stream) {
 
 	case "STORE":
 		log.Printf("[Data Plane] Peer %s is pushing a proactive replication STORE for CID: %s", stream.Conn().RemotePeer().ShortString(), requestedCID)
-		// Read the raw binary data being pushed by the remote peer
 		pushedData, err := io.ReadAll(stream)
 		if err != nil {
 			log.Printf("[Data Plane] Proactive replication stream interrupted: %v", err)
 			return
 		}
 
-		// Save it to our local cache completely unsolicited!
 		if err := s.cache.Put(requestedCID, pushedData, 0); err != nil {
 			log.Printf("[Data Plane] Failed to save replicated payload: %v", err)
 			return
 		}
-		// Advertise that we now hold a copy too
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_ = s.dht.Advertise(ctx, requestedCID)
 		cancel()
+
+	case "MATRIX":
+		log.Printf("[Topology] Peer %s requested our local network latency matrix map", stream.Conn().RemotePeer().ShortString())
+
+		localPeerstoreViews := make(map[string]string)
+		for _, p := range s.host.Network().Peers() {
+			ewma := s.host.Peerstore().LatencyEWMA(p)
+			if ewma > 0 {
+				localPeerstoreViews[p.String()] = ewma.String()
+			} else {
+				localPeerstoreViews[p.String()] = "Connected/Unmeasured"
+			}
+		}
+
+		encoder := json.NewEncoder(stream)
+		_ = encoder.Encode(localPeerstoreViews)
+		return
 	}
+}
+
+func (s *APIServer) handleSwarmMatrix(c *gin.Context) {
+	peers := s.host.Network().Peers()
+	responseMatrix := make(map[string]protocol.PeerLatencyInfo)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	for _, peerID := range peers {
+		localEWMA := s.host.Peerstore().LatencyEWMA(peerID)
+		latencyStr := "Unmeasured"
+		if localEWMA > 0 {
+			latencyStr = localEWMA.String()
+		}
+
+		info := protocol.PeerLatencyInfo{
+			PeerID:        peerID.String(),
+			LatencyFromUs: latencyStr,
+			TargetViews:   make(map[string]string),
+		}
+
+		stream, err := s.host.NewStream(ctx, peerID, DataProtocolID)
+		if err != nil {
+			info.TargetViews["status"] = "Offline/Unreachable for matrix query"
+			responseMatrix[peerID.String()] = info
+			continue
+		}
+
+		_, _ = stream.Write([]byte("MATRIX\nAll\n"))
+
+		var remoteViews map[string]string
+		decoder := json.NewDecoder(stream)
+		if err := decoder.Decode(&remoteViews); err == nil {
+			info.TargetViews = remoteViews
+		} else {
+			info.TargetViews["error"] = "Failed to parse remote matrix dataset"
+		}
+		stream.Close()
+
+		responseMatrix[peerID.String()] = info
+	}
+
+	c.JSON(http.StatusOK, protocol.SwarmMatrixResponse{
+		LocalNodeID:  s.host.ID().String(),
+		ClusterNodes: responseMatrix,
+	})
 }

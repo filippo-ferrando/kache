@@ -18,17 +18,18 @@ import (
 func main() {
 	apiAddr := flag.String("api", "127.0.0.1:8080", "Address configuration binding for local control operations")
 	cacheDir := flag.String("cache", "./dcdn_cache", "Target directory system path used for disk allocations")
+	cacheRetention := flag.Duration("cache-ttl", 24*time.Hour, "Default time-to-live duration for cached assets (e.g., 24h, 72h)")
+	cacheSize := flag.Int64("cache-size", 500*1024*1024, "Maximum cache capacity in bytes (e.g., 524288000 for 500MB)")
 	p2pPort := flag.Int("p2p-port", 0, "Port for p2p swarm connections (0 triggers auto-assign)")
 	flag.Parse()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// 1. Storage setup: Pass the context and construct the full Config structure
 	cacheCfg := cache.Config{
 		CacheDir:    *cacheDir,
-		MaxCapacity: 500 * 1024 * 1024, // 500MB hard limit boundary
-		DefaultTTL:  24 * time.Hour,
+		MaxCapacity: *cacheSize,      // 500MB hard limit boundary
+		DefaultTTL:  *cacheRetention, // 24 hours default lifespan for cached items
 		CleanPeriod: 5 * time.Minute,
 	}
 
@@ -37,19 +38,16 @@ func main() {
 		log.Fatalf("Critical system fault constructing physical cache blocks: %v", err)
 	}
 
-	// 2. Network setup: Pass the p2pPort integer to fulfill MakeHost(int)
 	hostInstance, discoveryService, err := node.MakeHost(*p2pPort)
 	if err != nil {
 		log.Fatalf("Network identity assignment failures detected: %v", err)
 	}
 
-	// 3. Routing engine instantiation
 	dhtEngine, err := dht.NewDHTEngine(ctx, hostInstance)
 	if err != nil {
 		log.Fatalf("Failed to register Kademlia core structures: %v", err)
 	}
 
-	// 4. API wiring
 	controlServer := api.NewAPIServer(hostInstance, dhtEngine, storage)
 	go func() {
 		log.Printf("[Initialization Master] Upstream API engine binding directly to target %s", *apiAddr)
@@ -58,7 +56,6 @@ func main() {
 		}
 	}()
 
-	// Graceful intercept
 	stopSignal := make(chan os.Signal, 1)
 	signal.Notify(stopSignal, syscall.SIGINT, syscall.SIGTERM)
 	<-stopSignal
