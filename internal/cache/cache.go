@@ -3,8 +3,12 @@ package cache
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -17,6 +21,7 @@ type Config struct {
 	MaxCapacity int64
 	DefaultTTL  time.Duration
 	CleanPeriod time.Duration
+	SecretKey   []byte
 }
 
 type CacheItem struct {
@@ -36,6 +41,53 @@ type LocalCacheManager struct {
 	cfg         Config
 	currentSize int64
 	registry    map[string]*CacheItem
+}
+
+func (cm *LocalCacheManager) encrypt(plainText []byte) ([]byte, error) {
+	if len(cm.cfg.SecretKey) != 32 {
+		return nil, errors.New("[Cache Engine] Encryption error: SecretKey must be 32 bytes for AES-256")
+	}
+
+	block, err := aes.NewCipher(cm.cfg.SecretKey)
+	if err != nil {
+		return nil, errors.New("[Cache Engine] Encryption error: failed to create cipher block")
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, errors.New("[Cache Engine] Encryption error: failed to create GCM cipher")
+	}
+
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, errors.New("[Cache Engine] Encryption error: failed to generate nonce")
+	}
+
+	return gcm.Seal(nonce, nonce, plainText, nil), nil
+}
+
+func (cm *LocalCacheManager) decrypt(cipherText []byte) ([]byte, error) {
+	if len(cm.cfg.SecretKey) != 32 {
+		return nil, errors.New("[Cache Engine] Decryption error: SecretKey must be 32 bytes for AES-256")
+	}
+
+	block, err := aes.NewCipher(cm.cfg.SecretKey)
+	if err != nil {
+		return nil, errors.New("[Cache Engine] Decryption error: failed to create cipher block")
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, errors.New("[Cache Engine] Decryption error: failed to create GCM cipher")
+	}
+
+	nonceSize := gcm.NonceSize()
+	if len(cipherText) < nonceSize {
+		return nil, errors.New("[Cache Engine] Decryption error: cipherText too short")
+	}
+
+	nonce, actualCipherText := cipherText[:nonceSize], cipherText[nonceSize:]
+	return gcm.Open(nil, nonce, actualCipherText, nil)
 }
 
 func NewLocalCacheManager(ctx context.Context, cfg Config) (*LocalCacheManager, error) {
@@ -79,8 +131,13 @@ func (cm *LocalCacheManager) Put(cid string, data []byte, customTTL time.Duratio
 		}
 	}
 
+	encryptedData, err := cm.encrypt(data)
+	if err != nil {
+		return fmt.Errorf("[Cache Engine] Failed to encrypt data for CID '%s': %w", cid, err)
+	}
+
 	filePath := filepath.Join(cm.cfg.CacheDir, cid)
-	if err := os.WriteFile(filePath, data, 0o644); err != nil {
+	if err := os.WriteFile(filePath, encryptedData, 0o600); err != nil {
 		return fmt.Errorf("[Cache Engine] Failed to write block stream to storage node: %w", err)
 	}
 
@@ -123,9 +180,14 @@ func (cm *LocalCacheManager) Get(cid string) ([]byte, error) {
 	item.LastAccess = time.Now()
 	cm.mu.RUnlock()
 
-	data, err := os.ReadFile(item.Path)
+	encryptedData, err := os.ReadFile(item.Path)
 	if err != nil {
 		return nil, fmt.Errorf("[Cache Engine] Failed to open cached object data frame: %w", err)
+	}
+
+	data, err := cm.decrypt(encryptedData)
+	if err != nil {
+		return nil, fmt.Errorf("[Cache Engine] Failed to decrypt cached data for CID '%s': %w", cid, err)
 	}
 
 	return data, nil
