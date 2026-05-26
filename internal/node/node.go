@@ -102,7 +102,6 @@ func (n *discoveryNotifee) HandlePeerFound(pi peer.AddrInfo) {
 	}
 	defer authStream.Close()
 
-	// 1. Receive the authentication challenge nonce from the peer
 	var challenge AuthChallenge
 	decoder := json.NewDecoder(authStream)
 	if err := decoder.Decode(&challenge); err != nil {
@@ -111,10 +110,8 @@ func (n *discoveryNotifee) HandlePeerFound(pi peer.AddrInfo) {
 		return
 	}
 
-	// 2. Hash the nonce using SHA256
 	hashedNonce := sha256.Sum256(challenge.Nonce)
 
-	// 3. Cryptographically sign the hashed nonce using our private RSA key
 	signature, err := rsa.SignPKCS1v15(rand.Reader, n.nodeKey, crypto.SHA256, hashedNonce[:])
 	if err != nil {
 		log.Printf("[Node Discovery] Internal Error: Failed to sign authentication challenge: %v", err)
@@ -122,7 +119,6 @@ func (n *discoveryNotifee) HandlePeerFound(pi peer.AddrInfo) {
 		return
 	}
 
-	// 4. Construct and send back the response payload
 	resp := AuthResponse{
 		Certificate: n.nodeCert.Raw,
 		Signature:   signature,
@@ -135,10 +131,8 @@ func (n *discoveryNotifee) HandlePeerFound(pi peer.AddrInfo) {
 		return
 	}
 
-	// Small buffer wait to allow the remote side to process the payload and close or validate
 	time.Sleep(100 * time.Millisecond)
 
-	// Check if the connection is still alive (if authentication failed, the server would have terminated it)
 	if len(n.host.Network().ConnsToPeer(pi.ID)) == 0 {
 		log.Printf("[Node Discovery] Security Rejection: Remote peer %s disconnected us after authentication verification", pi.ID.ShortString())
 		return

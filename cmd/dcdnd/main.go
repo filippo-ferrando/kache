@@ -34,7 +34,6 @@ func main() {
 	nodeCAKeyPath := flag.String("node-key", "", "File path to PEM-encoded node private key for cluster authentication")
 	flag.Parse()
 
-	// Enforce credential presence before proceeding with system initialization
 	if *rootCACertPath == "" || *nodeCACertPath == "" || *nodeCAKeyPath == "" {
 		log.Fatalf("Critical Configuration Failure: Security fields --root-ca, --node-cert, and --node-key are required flags.")
 	}
@@ -49,8 +48,8 @@ func main() {
 
 	cacheCfg := cache.Config{
 		CacheDir:    *cacheDir,
-		MaxCapacity: *cacheSize,      // 500MB hard limit boundary
-		DefaultTTL:  *cacheRetention, // 24 hours default lifespan for cached items
+		MaxCapacity: *cacheSize,
+		DefaultTTL:  *cacheRetention,
 		CleanPeriod: 5 * time.Minute,
 		SecretKey:   secretKey,
 	}
@@ -101,9 +100,7 @@ func main() {
 	_ = hostInstance.Close()
 }
 
-// loadAuthCredentials reads and decodes the cryptographic PEM assets from the host filesystem
 func loadAuthCredentials(rootCAPath, nodeCertPath, nodeKeyPath string) (*x509.Certificate, *x509.Certificate, *rsa.PrivateKey, error) {
-	// 1. Load and Parse Root CA Certificate
 	rootPEM, err := os.ReadFile(rootCAPath)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to read root CA file: %w", err)
@@ -117,7 +114,6 @@ func loadAuthCredentials(rootCAPath, nodeCertPath, nodeKeyPath string) (*x509.Ce
 		return nil, nil, nil, fmt.Errorf("failed to parse root CA x509 structure: %w", err)
 	}
 
-	// 2. Load and Parse Node Certificate
 	nodePEM, err := os.ReadFile(nodeCertPath)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to read node certificate file: %w", err)
@@ -126,13 +122,11 @@ func loadAuthCredentials(rootCAPath, nodeCertPath, nodeKeyPath string) (*x509.Ce
 	if nodeBlock == nil || nodeBlock.Type != "CERTIFICATE" {
 		return nil, nil, nil, errors.New("invalid or missing node certificate PEM block")
 	}
-	// FIXED: Parse the DER bytes into a *x509.Certificate object
 	nodeCert, err := x509.ParseCertificate(nodeBlock.Bytes)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to parse node x509 structure: %w", err)
 	}
 
-	// 3. Load and Decode Node Private Key
 	keyPEM, err := os.ReadFile(nodeKeyPath)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to read node private key file: %w", err)
@@ -144,12 +138,12 @@ func loadAuthCredentials(rootCAPath, nodeCertPath, nodeKeyPath string) (*x509.Ce
 
 	var privateKey *rsa.PrivateKey
 	switch keyBlock.Type {
-	case "RSA PRIVATE KEY": // PKCS#1 Format
+	case "RSA PRIVATE KEY":
 		privateKey, err = x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("failed to parse PKCS1 RSA private key: %w", err)
 		}
-	case "PRIVATE KEY": // PKCS#8 Format
+	case "PRIVATE KEY":
 		parsedKey, err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("failed to parse PKCS8 private key: %w", err)
@@ -167,7 +161,6 @@ func loadAuthCredentials(rootCAPath, nodeCertPath, nodeKeyPath string) (*x509.Ce
 }
 
 func getOrCreateCacheKey(cacheDir string) ([]byte, error) {
-	// 1. If cacheDir is empty, generate an ephemeral in-memory key
 	if cacheDir == "" {
 		log.Println("[Cache Engine] Operating with an empty cache directory. Generating temporary in-memory key...")
 		key := make([]byte, 32)
@@ -177,7 +170,6 @@ func getOrCreateCacheKey(cacheDir string) ([]byte, error) {
 		return key, nil
 	}
 
-	// 2. If a cache path is provided, attempt to load the file
 	keyPath := filepath.Join(cacheDir, ".cache.key")
 	if data, err := os.ReadFile(keyPath); err == nil {
 		if len(data) == 32 {

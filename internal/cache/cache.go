@@ -98,7 +98,7 @@ func NewLocalCacheManager(ctx context.Context, cfg Config) (*LocalCacheManager, 
 		return nil, errors.New("[Cache Engine] Invalid storage configuration: MaxCapacity must be greater than 0")
 	}
 	if cfg.CleanPeriod <= 0 {
-		cfg.CleanPeriod = 5 * time.Minute // Default guard fallback
+		cfg.CleanPeriod = 5 * time.Minute
 	}
 
 	if err := os.MkdirAll(cfg.CacheDir, 0o755); err != nil {
@@ -207,7 +207,7 @@ func (cm *LocalCacheManager) evictBestCandidate() bool {
 	for _, item := range cm.registry {
 		if item.IsExpired() {
 			cm.removeAssetFile(item.CID)
-			return true // Immediate execution pass completed successfully
+			return true
 		}
 
 		if !foundCandidate || item.LastAccess.Before(oldestAccess) {
