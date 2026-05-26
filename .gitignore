@@ -1,4 +1,5 @@
 test/
 dcdnd
 kachectl
-
+**.key
+**.crt

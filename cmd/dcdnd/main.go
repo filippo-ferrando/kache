@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
@@ -11,6 +12,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -25,6 +27,7 @@ func main() {
 	cacheDir := flag.String("cache", "./dcdn_cache", "Target directory system path used for disk allocations")
 	cacheRetention := flag.Duration("cache-ttl", 24*time.Hour, "Default time-to-live duration for cached assets (e.g., 24h, 72h)")
 	cacheSize := flag.Int64("cache-size", 500*1024*1024, "Maximum cache capacity in bytes (e.g., 524288000 for 500MB)")
+	cacheKeyPath := flag.String("cache-key", "", "File path to a 32-byte key for encrypting cached data (optional, will be auto-generated if not provided)")
 	p2pPort := flag.Int("p2p-port", 0, "Port for p2p swarm connections (0 triggers auto-assign)")
 	rootCACertPath := flag.String("root-ca", "", "File path to PEM-encoded root CA certificate for cluster authentication")
 	nodeCACertPath := flag.String("node-cert", "", "File path to PEM-encoded node certificate for cluster authentication")
@@ -39,11 +42,17 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	secretKey, err := getOrCreateCacheKey(*cacheKeyPath)
+	if err != nil {
+		log.Fatalf("failed to obtain cache encryption key: %s", err)
+	}
+
 	cacheCfg := cache.Config{
 		CacheDir:    *cacheDir,
 		MaxCapacity: *cacheSize,      // 500MB hard limit boundary
 		DefaultTTL:  *cacheRetention, // 24 hours default lifespan for cached items
 		CleanPeriod: 5 * time.Minute,
+		SecretKey:   secretKey,
 	}
 
 	rootCACert, nodeCert, nodeKey, err := loadAuthCredentials(*rootCACertPath, *nodeCACertPath, *nodeCAKeyPath)
@@ -155,4 +164,42 @@ func loadAuthCredentials(rootCAPath, nodeCertPath, nodeKeyPath string) (*x509.Ce
 	}
 
 	return rootCert, nodeCert, privateKey, nil
+}
+
+func getOrCreateCacheKey(cacheDir string) ([]byte, error) {
+	// 1. If cacheDir is empty, generate an ephemeral in-memory key
+	if cacheDir == "" {
+		log.Println("[Cache Engine] Operating with an empty cache directory. Generating temporary in-memory key...")
+		key := make([]byte, 32)
+		if _, err := rand.Read(key); err != nil {
+			return nil, fmt.Errorf("failed to generate random in-memory key: %w", err)
+		}
+		return key, nil
+	}
+
+	// 2. If a cache path is provided, attempt to load the file
+	keyPath := filepath.Join(cacheDir, ".cache.key")
+	if data, err := os.ReadFile(keyPath); err == nil {
+		if len(data) == 32 {
+			return data, nil
+		}
+		return nil, fmt.Errorf("malformed key file found at %s (must be 32 bytes)", keyPath)
+	}
+
+	// 3. File doesn't exist yet; create the directory and save a new persistent key
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		return nil, fmt.Errorf("failed to create cache directory layout: %w", err)
+	}
+
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return nil, fmt.Errorf("failed to generate random key: %w", err)
+	}
+
+	if err := os.WriteFile(keyPath, key, 0o600); err != nil {
+		return nil, fmt.Errorf("failed to save persistent cache key file: %w", err)
+	}
+
+	log.Printf("[Cache Engine] Persistent 32-byte master key initialized and saved to %s", keyPath)
+	return key, nil
 }
