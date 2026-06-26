@@ -1,0 +1,76 @@
+x-kache-node: &kache-node
+  image: kache-node:latest
+  networks:
+    - kache-net
+  restart: unless-stopped
+
+services:
+  node1:
+    <<: *kache-node
+    container_name: kache-node1
+    ports:
+      - "8180:80" # Host 8081 -> Container 80 (Web UI)
+      - "8181:8080" # Host 8080 -> Container 8080 (API Gateway)
+      - "9000:9000" # Host 9000 -> Container 9000 (P2P Swarm)
+    volumes:
+      - ./data/node1/cache:/app/cache
+      - ./certs/cluster-ca.crt:/app/certs/rootCA.crt:ro
+      - ./certs/node1/node1.crt:/app/certs/node.crt:ro
+      - ./certs/node1/node1.key:/app/certs/node.key:ro
+    command: >
+      -api 0.0.0.0:8080
+      -p2p-port 9000
+      -cache /app/cache
+      -cache-ttl 1h
+      -cache-size 524288000
+      -root-ca /app/certs/rootCA.crt
+      -node-cert /app/certs/node.crt
+      -node-key /app/certs/node.key
+
+  node2:
+    <<: *kache-node
+    container_name: kache-node2
+    ports:
+      - "8280:80"
+      - "8281:8080"
+      - "9001:9000"
+    volumes:
+      - ./data/node2/cache:/app/cache
+      - ./certs/cluster-ca.crt:/app/certs/rootCA.crt:ro
+      - ./certs/node2/node2.crt:/app/certs/node.crt:ro
+      - ./certs/node2/node2.key:/app/certs/node.key:ro
+    command: >
+      -api 0.0.0.0:8080
+      -p2p-port 9000
+      -cache /app/cache
+      -cache-ttl 1h
+      -cache-size 524288000
+      -root-ca /app/certs/rootCA.crt
+      -node-cert /app/certs/node.crt
+      -node-key /app/certs/node.key
+
+  node3:
+    <<: *kache-node
+    container_name: kache-node3
+    ports:
+      - "8380:80"
+      - "8381:8080"
+      - "9002:9000"
+    volumes:
+      - ./data/node3/cache:/app/cache
+      - ./certs/cluster-ca.crt:/app/certs/rootCA.crt:ro
+      - ./certs/node3/node3.crt:/app/certs/node.crt:ro
+      - ./certs/node3/node3.key:/app/certs/node.key:ro
+    command: >
+      -api 0.0.0.0:8080
+      -p2p-port 9000
+      -cache /app/cache
+      -cache-ttl 1h
+      -cache-size 524288000
+      -root-ca /app/certs/rootCA.crt
+      -node-cert /app/certs/node.crt
+      -node-key /app/certs/node.key
+
+networks:
+  kache-net:
+    driver: bridge

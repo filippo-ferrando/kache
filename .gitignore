@@ -3,3 +3,5 @@ dcdnd
 kachectl
 **.key
 **.crt
+certs/
+data/

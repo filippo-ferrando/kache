@@ -12,12 +12,22 @@
         table { width: 100%; border-collapse: collapse; margin-top: 10px; }
         th, td { padding: 10px; border: 1px solid #ddd; text-align: left; }
         th { background-color: #34495e; color: white; }
+        .connection-bar { background: #34495e; padding: 15px; border-radius: 6px; color: white; margin-bottom: 20px; }
+        input[type="text"] { padding: 8px; width: 250px; border-radius: 4px; border: 1px solid #ccc; }
+        button { padding: 8px 15px; background: #2ecc71; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        button:hover { background: #27ae60; }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>Kache Node Dashboard</h1>
         
+        <div class="connection-bar">
+            <label><strong>Target Node API:</strong></label>
+            <input type="text" id="apiEndpoint" value="http://127.0.0.1:8080">
+            <button onclick="forceRefresh()">Connect</button>
+        </div>
+
         <div class="grid">
             <div class="card">
                 <h2>Node Status</h2>
@@ -42,17 +52,23 @@
                 </tr>
             </thead>
             <tbody id="filesTable">
-                <tr><td colspan="4">Loading data...</td></tr>
+                <tr><td colspan="4">Waiting for connection...</td></tr>
             </tbody>
         </table>
     </div>
 
     <script>
-        const API_BASE = "http://127.0.0.1:8080"; // Change this if your daemon runs elsewhere
+        let refreshInterval;
+
+        function getEndpoint() {
+            return document.getElementById('apiEndpoint').value.replace(/\/$/, "");
+        }
 
         async function fetchStatus() {
+            const API_BASE = getEndpoint();
             try {
                 const res = await fetch(`${API_BASE}/status`);
+                if (!res.ok) throw new Error("Network response was not ok");
                 const data = await res.json();
                 
                 document.getElementById('peerId').innerText = data.peer_id;
@@ -64,12 +80,15 @@
                 document.getElementById('swarm').innerHTML = swarmList;
             } catch (err) {
                 console.error("Failed to fetch status", err);
+                document.getElementById('peerId').innerText = "Connection Failed (Check Port)";
             }
         }
 
         async function fetchFiles() {
+            const API_BASE = getEndpoint();
             try {
                 const res = await fetch(`${API_BASE}/content/list`);
+                if (!res.ok) throw new Error("Network response was not ok");
                 const data = await res.json();
                 
                 const tbody = document.getElementById('filesTable');
@@ -91,10 +110,18 @@
             }
         }
 
-        fetchStatus();
-        fetchFiles();
-        setInterval(fetchStatus, 10000); // Refresh every 10s
-        setInterval(fetchFiles, 10000);
+        function forceRefresh() {
+            fetchStatus();
+            fetchFiles();
+            
+            if (refreshInterval) clearInterval(refreshInterval);
+            refreshInterval = setInterval(() => {
+                fetchStatus();
+                fetchFiles();
+            }, 10000);
+        }
+
+        forceRefresh();
     </script>
 </body>
 </html>

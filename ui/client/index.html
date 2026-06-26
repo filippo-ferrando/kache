@@ -108,7 +108,7 @@
                 const data = await res.json();
                 if (res.ok) {
                     statusLabel.innerText = `Success! CID: ${data.cid.substring(0, 10)}...`;
-                    refreshNetwork(); // Refresh the list automatically
+                    refreshNetwork();                 
                 } else {
                     statusLabel.style.color = "#e74c3c";
                     statusLabel.innerText = "Error: " + data.error;
