@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Kache - Web Client</title>
+    <style>
+        body { font-family: Arial, sans-serif; background-color: #2c3e50; color: #ecf0f1; margin: 0; padding: 20px; }
+        .container { max-width: 800px; margin: auto; background: #34495e; padding: 25px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.3); }
+        h1, h2 { color: #f1c40f; border-bottom: 2px solid #f1c40f; padding-bottom: 5px; }
+        .control-group { margin-bottom: 20px; background: #2c3e50; padding: 15px; border-radius: 5px; }
+        input[type="text"], input[type="file"] { width: calc(100% - 22px); padding: 10px; margin-top: 5px; border: none; border-radius: 4px; }
+        button { background-color: #f1c40f; color: #2c3e50; border: none; padding: 10px 15px; font-weight: bold; cursor: pointer; border-radius: 4px; margin-top: 10px; transition: 0.2s; }
+        button:hover { background-color: #d4ac0d; }
+        table { width: 100%; border-collapse: collapse; margin-top: 15px; background: #ecf0f1; color: #333; border-radius: 4px; overflow: hidden; }
+        th, td { padding: 12px; border-bottom: 1px solid #bdc3c7; text-align: left; }
+        th { background-color: #95a5a6; color: white; }
+        a.download-btn { background: #27ae60; color: white; padding: 6px 12px; text-decoration: none; border-radius: 4px; font-size: 14px; }
+        a.download-btn:hover { background: #2ecc71; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Kache Standalone Client</h1>
+        
+        <div class="control-group">
+            <label><strong>Connect to Node API Endpoint:</strong></label>
+            <input type="text" id="apiEndpoint" value="http://127.0.0.1:8080">
+            <button onclick="refreshNetwork()">Connect & Refresh</button>
+        </div>
+
+        <div class="control-group">
+            <h2>Upload File to Swarm</h2>
+            <input type="file" id="fileInput">
+            <button onclick="uploadFile()">Upload to Edge</button>
+            <span id="uploadStatus" style="margin-left: 15px; color: #2ecc71;"></span>
+        </div>
+
+        <h2>Network File Explorer</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>CID</th>
+                    <th>Size</th>
+                    <th>Action</th>
+                </tr>
+            </thead>
+            <tbody id="filesTable">
+                <tr><td colspan="3">Click "Connect & Refresh" to load files...</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <script>
+        function getEndpoint() {
+            return document.getElementById('apiEndpoint').value.replace(/\/$/, "");
+        }
+
+        async function refreshNetwork() {
+            const api = getEndpoint();
+            const tbody = document.getElementById('filesTable');
+            tbody.innerHTML = "<tr><td colspan='3'>Loading...</td></tr>";
+
+            try {
+                const res = await fetch(`${api}/content/list`);
+                const data = await res.json();
+                
+                if (!data || data.length === 0) {
+                    tbody.innerHTML = "<tr><td colspan='3'>Network is empty.</td></tr>";
+                    return;
+                }
+
+                tbody.innerHTML = data.map(f => `
+                    <tr>
+                        <td title="${f.cid}"><code>${f.cid.substring(0, 20)}...</code></td>
+                        <td>${(f.size_bytes / 1024).toFixed(2)} KB</td>
+                        <td>
+                            <a href="${api}/content/stream/${f.cid}" class="download-btn" target="_blank" download>Download</a>
+                        </td>
+                    </tr>
+                `).join('');
+            } catch (err) {
+                console.error(err);
+                tbody.innerHTML = "<tr><td colspan='3' style='color:#e74c3c;'>Connection failed. Is the API running?</td></tr>";
+            }
+        }
+
+        async function uploadFile() {
+            const api = getEndpoint();
+            const fileInput = document.getElementById('fileInput');
+            const statusLabel = document.getElementById('uploadStatus');
+
+            if (fileInput.files.length === 0) {
+                alert("Please select a file first.");
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append("file", fileInput.files[0]);
+
+            statusLabel.innerText = "Uploading to network...";
+
+            try {
+                const res = await fetch(`${api}/content/upload`, {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await res.json();
+                if (res.ok) {
+                    statusLabel.innerText = `Success! CID: ${data.cid.substring(0, 10)}...`;
+                    refreshNetwork(); // Refresh the list automatically
+                } else {
+                    statusLabel.style.color = "#e74c3c";
+                    statusLabel.innerText = "Error: " + data.error;
+                }
+            } catch (err) {
+                statusLabel.style.color = "#e74c3c";
+                statusLabel.innerText = "Upload failed. See console.";
+                console.error(err);
+            }
+        }
+    </script>
+</body>
+</html>

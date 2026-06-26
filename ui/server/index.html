@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Kache - Node Dashboard</title>
+    <style>
+        body { font-family: Arial, sans-serif; background-color: #f4f4f9; color: #333; margin: 0; padding: 20px; }
+        .container { max-width: 900px; margin: auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        h1, h2 { color: #2c3e50; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .card { background: #ecf0f1; padding: 15px; border-radius: 6px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        th, td { padding: 10px; border: 1px solid #ddd; text-align: left; }
+        th { background-color: #34495e; color: white; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Kache Node Dashboard</h1>
+        
+        <div class="grid">
+            <div class="card">
+                <h2>Node Status</h2>
+                <p><strong>Peer ID:</strong> <span id="peerId">Loading...</span></p>
+                <p><strong>Addresses:</strong></p>
+                <ul id="addresses"></ul>
+            </div>
+            <div class="card">
+                <h2>Swarm Neighbors</h2>
+                <ul id="swarm"></ul>
+            </div>
+        </div>
+
+        <h2>Locally Indexed Data</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>CID (Hash)</th>
+                    <th>Size (Bytes)</th>
+                    <th>Expires At</th>
+                    <th>Providers</th>
+                </tr>
+            </thead>
+            <tbody id="filesTable">
+                <tr><td colspan="4">Loading data...</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <script>
+        const API_BASE = "http://127.0.0.1:8080"; // Change this if your daemon runs elsewhere
+
+        async function fetchStatus() {
+            try {
+                const res = await fetch(`${API_BASE}/status`);
+                const data = await res.json();
+                
+                document.getElementById('peerId').innerText = data.peer_id;
+                document.getElementById('addresses').innerHTML = data.addresses.map(a => `<li>${a}</li>`).join('');
+                
+                const swarmList = data.swarm_peers.length > 0 
+                    ? data.swarm_peers.map(p => `<li>${p}</li>`).join('') 
+                    : "<li>No neighbors connected</li>";
+                document.getElementById('swarm').innerHTML = swarmList;
+            } catch (err) {
+                console.error("Failed to fetch status", err);
+            }
+        }
+
+        async function fetchFiles() {
+            try {
+                const res = await fetch(`${API_BASE}/content/list`);
+                const data = await res.json();
+                
+                const tbody = document.getElementById('filesTable');
+                if (!data || data.length === 0) {
+                    tbody.innerHTML = "<tr><td colspan='4'>No files cached on this node.</td></tr>";
+                    return;
+                }
+
+                tbody.innerHTML = data.map(f => `
+                    <tr>
+                        <td><code>${f.cid.substring(0, 16)}...</code></td>
+                        <td>${f.size_bytes}</td>
+                        <td>${new Date(f.expires_at).toLocaleString()}</td>
+                        <td>${f.providers.length}</td>
+                    </tr>
+                `).join('');
+            } catch (err) {
+                console.error("Failed to fetch files", err);
+            }
+        }
+
+        fetchStatus();
+        fetchFiles();
+        setInterval(fetchStatus, 10000); // Refresh every 10s
+        setInterval(fetchFiles, 10000);
+    </script>
+</body>
+</html>

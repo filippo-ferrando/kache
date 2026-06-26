@@ -17,6 +17,7 @@ import (
 	"kache/internal/dht"
 	"kache/pkg/protocol"
 
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
@@ -41,7 +42,7 @@ func NewAPIServer(h host.Host, d *dht.DHTEngine, c *cache.LocalCacheManager) *AP
 func (s *APIServer) Start(listenAddr string) error {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
-
+	r.Use(cors.Default())
 	r.GET("/status", s.handleStatus)
 	r.GET("/content/list", s.handleContentList)
 	r.GET("/content/stream/:cid", s.handleStreamToClient)
